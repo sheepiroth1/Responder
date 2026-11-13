@@ -25,6 +25,37 @@ from utils import *
 
 __version__ = 'Responder 3.2.2.0'
 
+def RunFirstAvailable(commands):
+	"""Run the first command (each a list of argv) that is available and succeeds,
+	returning its combined stdout/stderr as bytes. Commands that are missing
+	(OSError) or fail (CalledProcessError) are skipped. If none work, an error
+	message is returned as bytes so callers can always .decode() the result."""
+	last_err = None
+	for cmd in commands:
+		try:
+			return subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+		except (OSError, subprocess.CalledProcessError) as ex:
+			last_err = ex
+			continue
+	return ("Error fetching data: %s" % (last_err,)).encode('latin-1')
+
+def GenerateSSLCerts(ResponderPATH):
+	"""Generate the self-signed cert/key used by the HTTPS server by invoking
+	openssl directly, which works on Linux, macOS and Windows alike (the old
+	gen-self-signed-cert.sh shell script only ran on *nix). Output is discarded."""
+	KeyPath  = os.path.join(ResponderPATH, 'certs', 'responder.key')
+	CertPath = os.path.join(ResponderPATH, 'certs', 'responder.crt')
+	try:
+		with open(os.devnull, 'wb') as devnull:
+			subprocess.call(['openssl', 'genrsa', '-out', KeyPath, '2048'],
+							stdout=devnull, stderr=devnull)
+			subprocess.call(['openssl', 'req', '-new', '-x509', '-days', '3650',
+							'-key', KeyPath, '-out', CertPath, '-subj', '/'],
+							stdout=devnull, stderr=devnull)
+	except OSError:
+		print(utils.color("[!] Warning: openssl not found in PATH. HTTPS server will not "
+						"work until certs/responder.crt and certs/responder.key are generated.", 3, 1))
+
 class Settings:
 	
 	def __init__(self):
@@ -382,32 +413,20 @@ class Settings:
 		if os.path.isfile(self.ResponderPATH+'/Responder.db'):
 			pass
 		else:
-			#If it's the first time, generate SSL certs for this Responder session and send openssl output to /dev/null
-			Certs = os.system(self.ResponderPATH+"/certs/gen-self-signed-cert.sh >/dev/null 2>&1")
-		
-		try:
-			NetworkCard = subprocess.check_output(["ifconfig", "-a"])
-		except:
-			try:
-				NetworkCard = subprocess.check_output(["ip", "address", "show"])
-			except subprocess.CalledProcessError as ex:
-				NetworkCard = "Error fetching Network Interfaces:", ex
-				pass
-		try:
-			p = subprocess.Popen('resolvectl', stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-			DNS = p.stdout.read()
-		except:
-			p = subprocess.Popen(['cat', '/etc/resolv.conf'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-			DNS = p.stdout.read()
+			#If it's the first time, generate SSL certs for this Responder session (cross-platform, openssl output discarded)
+			GenerateSSLCerts(self.ResponderPATH)
 
-		try:
-			RoutingInfo = subprocess.check_output(["netstat", "-rn"])
-		except:
-			try:
-				RoutingInfo = subprocess.check_output(["ip", "route", "show"])
-			except subprocess.CalledProcessError as ex:
-				RoutingInfo = "Error fetching Routing information:", ex
-				pass
+		# Gather network diagnostics for the config dump. The tooling differs per
+		# OS, so pick the right commands for the current platform. RunFirstAvailable
+		# tries each in order and always returns bytes, so .decode() below is safe.
+		if os.name == 'nt':
+			NetworkCard = RunFirstAvailable([["ipconfig", "/all"]])
+			DNS         = RunFirstAvailable([["nslookup", "127.0.0.1"]])
+			RoutingInfo = RunFirstAvailable([["netstat", "-rn"]])
+		else:
+			NetworkCard = RunFirstAvailable([["ifconfig", "-a"], ["ip", "address", "show"]])
+			DNS         = RunFirstAvailable([["resolvectl"], ["cat", "/etc/resolv.conf"]])
+			RoutingInfo = RunFirstAvailable([["netstat", "-rn"], ["ip", "route", "show"]])
 
 		Message = "%s\nCurrent environment is:\nNetwork Config:\n%s\nDNS Settings:\n%s\nRouting info:\n%s\n\n"%(utils.HTTPCurrentDate(), NetworkCard.decode('latin-1'),DNS.decode('latin-1'),RoutingInfo.decode('latin-1'))
 		try:
